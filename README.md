@@ -1,52 +1,28 @@
 # Seated Posture Monitor
 
-A lightweight, CPU-only posture monitoring CLI built using **Python,
-OpenCV, and MediaPipe**. It analyzes webcam or video input, extracts
-upper-body pose landmarks, classifies posture over time, and generates a
-JSON report containing posture statistics.
+A lightweight, **CPU-only, headless CLI** that uses Python, OpenCV, and
+MediaPipe to analyze seated upper-body posture from a webcam or video
+and generate a JSON session report.
 
 ## Features
 
--   **Pose Detection:** Uses MediaPipe to detect upper-body landmarks.
--   **Geometric Analysis:** Evaluates torso inclination, forward head
-    position, and shoulder alignment.
--   **Posture Classification:** Classifies posture as good or bad using
-    configurable geometric thresholds.
--   **Temporal Smoothing:** Uses Exponential Moving Average (EMA),
-    hysteresis, and minimum confirmation durations to reduce unstable
-    classifications.
--   **Session Analytics:** Tracks good/bad posture duration, posture
-    breaks, observation coverage, and an overall posture score.
--   **Robust Processing:** Handles invalid landmarks, dropped frames,
-    and video processing errors.
--   **JSON Output:** Exports session statistics and diagnostic
-    information.
-
-## Tech Stack
-
--   Python
--   OpenCV
--   MediaPipe
--   NumPy
+-   Detects upper-body landmarks using MediaPipe.
+-   Extracts torso-angle and normalized head-position features.
+-   Classifies posture over time using geometric thresholds.
+-   Reduces flicker with EMA smoothing, hysteresis, and time-based state
+    confirmation.
+-   Reports good/bad posture duration, posture breaks, observation
+    coverage, and a 0--100 score.
+-   Handles invalid landmarks and dropped frames.
 
 ## Installation
 
-Clone the repository:
-
 ``` bash
 git clone https://github.com/simranbajaj06/Seated-Posture-Monitor.git
-cd posture-monitor
-```
+cd Seated-Posture-Monitor
 
-Create and activate a virtual environment:
-
-``` bash
 python -m venv venv
-```
 
-Install dependencies:
-
-``` bash
 # Windows
 venv\Scripts\activate
 
@@ -58,80 +34,66 @@ pip install -r requirements.txt
 
 ## Usage
 
-Monitor a video file:
+Process a video:
 
 ``` bash
 python posture_monitor.py --source test.mp4 --output posture.json
 ```
 
-Monitor a webcam:
+Use the webcam:
 
 ``` bash
 python posture_monitor.py --source 0 --output posture.json
 ```
 
-Use the CLI help to see available options:
+See available CLI options:
 
 ``` bash
 python posture_monitor.py --help
 ```
 
-## How It Works
+## Approach and Threshold Selection
 
-1.  **Frame Processing:** OpenCV reads frames from the webcam or video
-    file.
-2.  **Landmark Extraction:** MediaPipe detects pose landmarks, including
-    the nose, shoulders, and hips.
-3.  **Feature Extraction:** Geometric features are calculated to
-    estimate torso inclination, head position, and shoulder alignment.
-4.  **Classification:** Features are compared against configurable
-    thresholds to determine posture.
-5.  **Temporal Analysis:** EMA smoothing and time-based state
-    transitions help prevent rapid classification changes.
-6.  **Report Generation:** Session statistics are saved as a JSON file.
+OpenCV reads frames and MediaPipe extracts nose, shoulder, and hip
+landmarks. The script derives geometric posture features, classifies
+them, and applies temporal smoothing and confirmation before accepting a
+state change. A single frame therefore does not immediately count as a
+posture break.
 
-## Posture Score
+Thresholds were calibrated from `test4.mp4`, using 0--18 seconds as the
+upright segment and 20--40 seconds as the slouched segment. For each
+feature, the midpoint between the segment medians was used as the
+initial boundary, with a hysteresis band of 10% of the median separation
+on each side.
 
-The posture score represents the percentage of classified observation
-time spent in good posture:
+  Feature                   Bad posture   Good/recovery
+  ----------------------- ------------- ---------------
+  Torso angle               Below 5.24°     Above 6.05°
+  Normalized head ratio     Below 0.100     Above 0.135
 
-`Posture Score = (Good Posture Duration / Observed Duration) × 100`
+In this recording, both features had lower values in the slouched
+segment, so the classifier uses that observed direction. Shoulder tilt
+was excluded from primary classification because its upright and
+slouched distributions overlapped. These are recording-specific
+heuristics, not universal or clinically validated limits; results may
+vary with the person, camera angle, and setup.
 
-Unobserved intervals are excluded from this calculation. The score is a
-heuristic indicator, not a medical assessment.
+## Score and Output
 
-## Threshold Rationale
+`Posture score = good posture seconds / observed seconds × 100`
 
-The geometric thresholds are heuristic starting points based on torso
-inclination, normalized head position, and shoulder alignment.
-Hysteresis uses separate thresholds for entering and leaving a
-bad-posture state to reduce classification flickering. Minimum
-confirmation durations help avoid treating brief movements as sustained
-posture changes. These values are configurable and may require
-calibration for different camera angles and users.
-
-## Output
-
-The generated `posture.json` contains:
-
--   Session duration and processing status
--   Total and valid pose frames
--   Good and bad posture durations
--   Observation coverage and unobserved duration
--   Good posture percentage
--   Number of posture breaks
--   Overall posture score
--   Processing diagnostics
+Unobserved intervals are excluded. The JSON report includes session
+status and duration, frame counts, good/bad durations, observation
+coverage, posture breaks, score, and diagnostic information.
 
 ## Limitations
 
--   Results depend on camera placement, visibility, and lighting.
--   Geometric thresholds are heuristic and are not clinically validated.
--   The system is designed for upper-body posture monitoring in a seated
-    position.
+-   Designed for a single seated person and upper-body monitoring.
+-   Accuracy depends on camera position, visibility, lighting, and user
+    orientation.
+-   Thresholds were calibrated on a limited sample and need validation
+    on other recordings.
+-   The score is a heuristic summary, not a medical assessment.
 
-------------------------------------------------------------------------
-
-**Note:** This project is designed as a headless, CPU-only command-line
-application. It does not require a graphical interface, web server,
-Docker, or a separately trained machine learning model.
+**Scope:** No UI, web service, Docker, multi-person tracking, or
+separately trained model.
