@@ -23,31 +23,15 @@ VISIBILITY_THRESHOLD = 0.35
 # EMA smoothing. Higher values react faster; lower values smooth more.
 EMA_ALPHA = 0.25
 
-# Calibration-derived hysteresis thresholds from the supplied test4.mp4:
-# upright segment: 0-18s; slouched segment: 20-40s.
-#
-# In this recording, BOTH torso_angle and head_ratio were lower in the
-# slouched segment. These directions are recording/camera dependent and
-# must not be treated as universal biomechanical rules.
-#
-# For each feature, the midpoint between the upright/slouched medians was
-# calculated, with a hysteresis band equal to 10% of the median separation
-# on each side.
-#
-# Torso angle:
-#   upright median = 7.6568, slouched median = 3.6329
-#   bad below 5.2425; recovered/good above 6.0472
-BAD_TORSO_ANGLE = 5.24
-GOOD_TORSO_ANGLE = 6.05
-
-# Head ratio:
-#   upright median = 0.2044, slouched median = 0.02975
-#   bad below 0.0996; recovered/good above 0.1345
-BAD_HEAD_RATIO = 0.100
-GOOD_HEAD_RATIO = 0.135
-
-# Shoulder tilt distributions overlapped substantially in calibration.
-# Keep it out of the primary posture decision for this recording.
+# Per-session adaptive calibration.
+# The first few seconds are assumed to contain a comfortable upright posture.
+# Thresholds are then derived from the user's own baseline median and MAD.
+BASELINE_CALIBRATION_SECONDS = 3.0
+TORSO_MAD_MULTIPLIER = 2.0
+HEAD_MAD_MULTIPLIER = 2.5
+MIN_TORSO_DEVIATION_DEGREES = 2.5
+MIN_HEAD_RATIO_DEVIATION = 0.03
+RECOVERY_HYSTERESIS_FACTOR = 0.70
 USE_SHOULDER_TILT = False
 
 # Require sustained evidence before changing stable state.
@@ -248,16 +232,16 @@ class FeatureSmoother:
 
 class TemporalPostureClassifier:
     """
-    Stateful posture classifier.
+    Adaptive, per-session posture classifier.
 
-    A candidate transition is held pending until it persists long enough.
-    While pending, its time is not committed. If confirmed, the pending
-    interval is attributed to the new state; if cancelled, it is attributed
-    to the previous stable state.
+    The first BASELINE_CALIBRATION_SECONDS of usable observations are used
+    as the person's neutral/upright baseline. Median and MAD are calculated
+    separately for torso_angle and head_ratio. Subsequent observations are
+    classified by deviation from that baseline, not by fixed absolute values.
 
-    Initial posture is also confirmed over time. An initial bad episode is
-    counted as a bad episode, but separately from breaks that occur after an
-    observed good state.
+    This makes the decision boundaries less dependent on camera distance,
+    body proportions, and the absolute coordinate scale. It assumes the
+    person starts the recording in a comfortable upright posture.
     """
 
     def __init__(self):
@@ -271,57 +255,100 @@ class TemporalPostureClassifier:
         self.observed_seconds = 0.0
         self.unobserved_gap_seconds = 0.0
 
-        # Count each confirmed bad-posture episode, including one already
-        # present when recording starts. This matches the session-level
-        # interpretation of "how many poor-posture episodes occurred".
         self.posture_breaks = 0
         self.good_to_bad_transitions = 0
+
+        self.baseline_elapsed = 0.0
+        self.baseline_ready = False
+        self.baseline_samples = {"torso_angle": [], "head_ratio": []}
+        self.baseline = {}
+        self.thresholds = {}
 
     def _add_time(self, state: Optional[str], seconds: float) -> None:
         if seconds <= 0 or state not in ("good", "bad"):
             return
-
         if state == "good":
             self.good_seconds += seconds
         else:
             self.bad_seconds += seconds
-
         self.observed_seconds += seconds
+
+    def _finish_baseline(self) -> None:
+        for name, values in self.baseline_samples.items():
+            arr = np.asarray(values, dtype=np.float64)
+            if arr.size < 5:
+                continue
+            median = float(np.median(arr))
+            mad = float(np.median(np.abs(arr - median)))
+            self.baseline[name] = {
+                "median": median,
+                "mad": mad,
+                "sample_count": int(arr.size),
+            }
+
+        if "torso_angle" not in self.baseline or "head_ratio" not in self.baseline:
+            return
+
+        torso_mad = self.baseline["torso_angle"]["mad"]
+        head_mad = self.baseline["head_ratio"]["mad"]
+
+        # MAD-based personalized deviation thresholds, with minimum floors
+        # to prevent unrealistically tiny thresholds in very stable footage.
+        torso_delta = max(
+            MIN_TORSO_DEVIATION_DEGREES,
+            TORSO_MAD_MULTIPLIER * torso_mad,
+        )
+        head_delta = max(
+            MIN_HEAD_RATIO_DEVIATION,
+            HEAD_MAD_MULTIPLIER * head_mad,
+        )
+
+        self.thresholds = {
+            "torso_deviation": float(torso_delta),
+            "head_ratio_deviation": float(head_delta),
+            "torso_recovery_deviation": float(
+                torso_delta * RECOVERY_HYSTERESIS_FACTOR
+            ),
+            "head_ratio_recovery_deviation": float(
+                head_delta * RECOVERY_HYSTERESIS_FACTOR
+            ),
+        }
+        self.baseline_ready = True
+
+    def _collect_baseline(self, features: Dict[str, Optional[float]]) -> None:
+        for name in ("torso_angle", "head_ratio"):
+            value = features.get(name)
+            if value is not None and np.isfinite(value):
+                self.baseline_samples[name].append(float(value))
 
     def classify_candidate(
         self, features: Dict[str, Optional[float]]
     ) -> Optional[str]:
+        if not self.baseline_ready:
+            return None
+
         torso = features.get("torso_angle")
         head = features.get("head_ratio")
-
-        # Both primary features are expected from extract_features(). If
-        # either is missing, do not invent a classification for this frame.
         if torso is None or head is None:
             return None
 
-        # Calibration for test4.mp4 showed lower values in the slouched
-        # segment. Either primary feature crossing its bad boundary is
-        # sufficient evidence to start/maintain a bad candidate.
-        bad_evidence = (
-            torso < BAD_TORSO_ANGLE
-            or head < BAD_HEAD_RATIO
-        )
+        torso_deviation = abs(torso - self.baseline["torso_angle"]["median"])
+        head_deviation = abs(head - self.baseline["head_ratio"]["median"])
 
-        # Require BOTH primary features to cross their recovery boundaries
-        # before declaring good posture again. Values inside the hysteresis
-        # bands preserve the current stable state.
+        bad_evidence = (
+            torso_deviation > self.thresholds["torso_deviation"]
+            or head_deviation > self.thresholds["head_ratio_deviation"]
+        )
         good_evidence = (
-            torso > GOOD_TORSO_ANGLE
-            and head > GOOD_HEAD_RATIO
+            torso_deviation < self.thresholds["torso_recovery_deviation"]
+            and head_deviation < self.thresholds["head_ratio_recovery_deviation"]
         )
 
         if self.state == "bad":
             return "good" if good_evidence else "bad"
-
         if self.state == "good":
             return "bad" if bad_evidence else "good"
 
-        # Initial state: require unambiguous evidence.
         if bad_evidence:
             return "bad"
         if good_evidence:
@@ -337,42 +364,42 @@ class TemporalPostureClassifier:
         features: Dict[str, Optional[float]],
         timestamp: float,
     ) -> None:
-        """
-        Process one valid observation.
-
-        Every short interval between valid observations is accounted for:
-        - stable intervals go to the current state;
-        - transition-candidate intervals are held temporarily;
-        - if the transition is confirmed, held time goes to the new state;
-        - if the transition is cancelled, held time goes to the old state.
-        """
         timestamp = float(timestamp)
-        proposed = self.classify_candidate(features)
 
         if self.last_timestamp is None:
             self.last_timestamp = timestamp
-            self._start_candidate(proposed)
+            if not self.baseline_ready:
+                self._collect_baseline(features)
             return
 
         dt = timestamp - self.last_timestamp
         self.last_timestamp = timestamp
-
         if dt <= 0:
             return
 
         if dt > MAX_FRAME_GAP_SECONDS:
-            # This interval is not reliable enough to infer posture.
             self.unobserved_gap_seconds += dt
-            self._start_candidate(proposed)
+            self._start_candidate(None)
+            # A long gap should not count toward calibration duration.
             return
 
-        # Initial state: wait for enough consecutive evidence before starting
-        # the session's good/bad accounting.
+        # Calibrate from the first few seconds of valid observations.
+        # These calibration frames are deliberately excluded from the score.
+        if not self.baseline_ready:
+            self._collect_baseline(features)
+            self.baseline_elapsed += dt
+            if self.baseline_elapsed >= BASELINE_CALIBRATION_SECONDS:
+                self._finish_baseline()
+                self._start_candidate(None)
+            return
+
+        proposed = self.classify_candidate(features)
+
+        # Initial state: require sustained evidence before counting time.
         if self.state is None:
             if proposed is None:
                 self._start_candidate(None)
                 return
-
             if proposed != self.candidate:
                 self._start_candidate(proposed)
                 self.candidate_duration = dt
@@ -384,37 +411,26 @@ class TemporalPostureClassifier:
                 if proposed == "bad"
                 else GOOD_CONFIRMATION_SECONDS
             )
-
             if self.candidate_duration >= required:
                 self.state = proposed
                 self._add_time(self.state, self.candidate_duration)
-
                 if self.state == "bad":
-                    # The recording began in a confirmed bad posture.
                     self.posture_breaks += 1
-
                 self._start_candidate(None)
             return
 
-        # No clear evidence for either class: preserve the stable state and
-        # treat this short interval as belonging to that state. Any previously
-        # pending transition has been disproved.
+        # Stable state or ambiguous observation: assign cancelled pending
+        # candidate time to the prior stable state.
         if proposed is None or proposed == self.state:
             if self.candidate is not None:
                 self._add_time(self.state, self.candidate_duration)
                 self._start_candidate(None)
-
             self._add_time(self.state, dt)
             return
 
-        # We have evidence for the opposite state. Start or extend a pending
-        # transition. Do not charge it until confirmed/cancelled.
         if proposed != self.candidate:
             if self.candidate is not None:
-                # A different candidate replaced the old one; the old pending
-                # interval was not confirmed, so assign it to stable state.
                 self._add_time(self.state, self.candidate_duration)
-
             self._start_candidate(proposed)
             self.candidate_duration = dt
         else:
@@ -425,22 +441,16 @@ class TemporalPostureClassifier:
             if proposed == "bad"
             else GOOD_CONFIRMATION_SECONDS
         )
-
         if self.candidate_duration >= required:
             previous_state = self.state
             self.state = proposed
-
-            # Count the full confirmed transition interval under the new state.
             self._add_time(self.state, self.candidate_duration)
-
             if previous_state == "good" and self.state == "bad":
                 self.posture_breaks += 1
                 self.good_to_bad_transitions += 1
-
             self._start_candidate(None)
 
     def finalize(self) -> None:
-        """Commit any unconfirmed trailing interval to the stable state."""
         if self.candidate is not None and self.candidate_duration > 0:
             self._add_time(self.state, self.candidate_duration)
         self._start_candidate(None)
@@ -448,11 +458,7 @@ class TemporalPostureClassifier:
     def result(self) -> Optional[Dict[str, Union[float, int]]]:
         if self.observed_seconds <= 0:
             return None
-
-        percentage = (
-            self.good_seconds / self.observed_seconds
-        ) * 100.0
-
+        percentage = (self.good_seconds / self.observed_seconds) * 100.0
         return {
             "good_posture_seconds": round(self.good_seconds, 2),
             "bad_posture_seconds": round(self.bad_seconds, 2),
@@ -720,16 +726,15 @@ def process_video(
         "valid_pose_frames": int(valid_pose_frames),
         "read_or_processing_errors": int(total_read_errors),
         "stop_reason": stop_reason,
+        "baseline_calibration_completed": classifier.baseline_ready,
         "threshold_configuration": {
-            "calibration_source": "test4.mp4",
-            "upright_segment_seconds": [0.0, 18.0],
-            "slouched_segment_seconds": [20.0, 40.0],
-            "bad_torso_angle_below": BAD_TORSO_ANGLE,
-            "good_torso_angle_above": GOOD_TORSO_ANGLE,
-            "bad_head_ratio_below": BAD_HEAD_RATIO,
-            "good_head_ratio_above": GOOD_HEAD_RATIO,
+            "method": "per_session_baseline_median_and_MAD",
+            "baseline_calibration_seconds": BASELINE_CALIBRATION_SECONDS,
+            "baseline_features": classifier.baseline,
+            "adaptive_thresholds": classifier.thresholds,
             "shoulder_tilt_used_for_classification": USE_SHOULDER_TILT,
-            "note": "Recording-specific heuristic thresholds; validate on a separate recording."
+            "assumption": "The opening calibration segment contains comfortable upright posture.",
+            "note": "Personalized heuristic thresholds; validate across users and camera setups."
         },
         "coverage_percentage": round(coverage_percentage, 2),
         "unobserved_duration_seconds": round(unobserved_duration, 2),
