@@ -37,13 +37,13 @@ pip install -r requirements.txt
 Process a video:
 
 ``` bash
-python posture_monitor.py --source test.mp4 --output posture.json
+python posture_monitor.py --source test.mp4 --out posture.json
 ```
 
 Use the webcam:
 
 ``` bash
-python posture_monitor.py --source 0 --output posture.json
+python posture_monitor.py --source 0 --duration 60 --out posture.json
 ```
 
 See available CLI options:
