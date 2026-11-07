@@ -1,4 +1,4 @@
-# Posture Monitor
+# Seated Posture Monitor
 
 A lightweight, CPU-only posture monitoring CLI built using **Python,
 OpenCV, and MediaPipe**. It analyzes webcam or video input, extracts
