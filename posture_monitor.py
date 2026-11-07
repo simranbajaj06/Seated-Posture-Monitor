@@ -23,16 +23,32 @@ VISIBILITY_THRESHOLD = 0.35
 # EMA smoothing. Higher values react faster; lower values smooth more.
 EMA_ALPHA = 0.25
 
-# Hysteresis thresholds. A bad state is entered at the "bad" thresholds and
-# exited only after all available features fall below the "good" thresholds.
-BAD_TORSO_ANGLE = 18.0
-GOOD_TORSO_ANGLE = 12.0
+# Calibration-derived hysteresis thresholds from the supplied test4.mp4:
+# upright segment: 0-18s; slouched segment: 20-40s.
+#
+# In this recording, BOTH torso_angle and head_ratio were lower in the
+# slouched segment. These directions are recording/camera dependent and
+# must not be treated as universal biomechanical rules.
+#
+# For each feature, the midpoint between the upright/slouched medians was
+# calculated, with a hysteresis band equal to 10% of the median separation
+# on each side.
+#
+# Torso angle:
+#   upright median = 7.6568, slouched median = 3.6329
+#   bad below 5.2425; recovered/good above 6.0472
+BAD_TORSO_ANGLE = 5.24
+GOOD_TORSO_ANGLE = 6.05
 
-BAD_HEAD_RATIO = 0.40
-GOOD_HEAD_RATIO = 0.30
+# Head ratio:
+#   upright median = 0.2044, slouched median = 0.02975
+#   bad below 0.0996; recovered/good above 0.1345
+BAD_HEAD_RATIO = 0.100
+GOOD_HEAD_RATIO = 0.135
 
-BAD_SHOULDER_TILT = 15.0
-GOOD_SHOULDER_TILT = 10.0
+# Shoulder tilt distributions overlapped substantially in calibration.
+# Keep it out of the primary posture decision for this recording.
+USE_SHOULDER_TILT = False
 
 # Require sustained evidence before changing stable state.
 BAD_CONFIRMATION_SECONDS = 0.8
@@ -149,8 +165,9 @@ def extract_features(
         math.atan2(math.sqrt(dx * dx + dz * dz), abs(dy) + 1e-9)
     )
 
-    # Estimated head displacement along MediaPipe's relative depth axis,
-    # normalized by torso length. This is a heuristic, not a clinical measure.
+    # Absolute nose-to-shoulder displacement along MediaPipe's relative depth
+    # axis, normalized by torso length. It is a camera/orientation-dependent
+    # geometric proxy, not a universal forward-head-posture measurement.
     head_ratio = abs(float(nose_w.z) - float(shoulder[2])) / torso_length
 
     shoulder_tilt = None
@@ -182,6 +199,7 @@ def extract_features(
             float(shoulder_tilt) if shoulder_tilt is not None else None
         ),
     }
+
 
 # ---------------------------------------------------------------------------
 # Feature smoothing
@@ -275,42 +293,35 @@ class TemporalPostureClassifier:
     ) -> Optional[str]:
         torso = features.get("torso_angle")
         head = features.get("head_ratio")
-        shoulder = features.get("shoulder_tilt")
 
-        available = [
-            value for value in (torso, head, shoulder) if value is not None
-        ]
-        if not available:
+        # Both primary features are expected from extract_features(). If
+        # either is missing, do not invent a classification for this frame.
+        if torso is None or head is None:
             return None
 
-        # A feature only contributes when it is available.
+        # Calibration for test4.mp4 showed lower values in the slouched
+        # segment. Either primary feature crossing its bad boundary is
+        # sufficient evidence to start/maintain a bad candidate.
         bad_evidence = (
-            (torso is not None and torso > BAD_TORSO_ANGLE)
-            or (head is not None and head > BAD_HEAD_RATIO)
-            or (
-                shoulder is not None
-                and shoulder > BAD_SHOULDER_TILT
-            )
+            torso < BAD_TORSO_ANGLE
+            or head < BAD_HEAD_RATIO
         )
 
+        # Require BOTH primary features to cross their recovery boundaries
+        # before declaring good posture again. Values inside the hysteresis
+        # bands preserve the current stable state.
         good_evidence = (
-            (torso is None or torso < GOOD_TORSO_ANGLE)
-            and (head is None or head < GOOD_HEAD_RATIO)
-            and (
-                shoulder is None
-                or shoulder < GOOD_SHOULDER_TILT
-            )
+            torso > GOOD_TORSO_ANGLE
+            and head > GOOD_HEAD_RATIO
         )
 
         if self.state == "bad":
-            # Hysteresis: remain bad until there is clear recovery evidence.
             return "good" if good_evidence else "bad"
 
         if self.state == "good":
-            # Hysteresis: remain good until a bad threshold is crossed.
             return "bad" if bad_evidence else "good"
 
-        # No stable state yet. Require clear evidence to initialize.
+        # Initial state: require unambiguous evidence.
         if bad_evidence:
             return "bad"
         if good_evidence:
@@ -709,6 +720,17 @@ def process_video(
         "valid_pose_frames": int(valid_pose_frames),
         "read_or_processing_errors": int(total_read_errors),
         "stop_reason": stop_reason,
+        "threshold_configuration": {
+            "calibration_source": "test4.mp4",
+            "upright_segment_seconds": [0.0, 18.0],
+            "slouched_segment_seconds": [20.0, 40.0],
+            "bad_torso_angle_below": BAD_TORSO_ANGLE,
+            "good_torso_angle_above": GOOD_TORSO_ANGLE,
+            "bad_head_ratio_below": BAD_HEAD_RATIO,
+            "good_head_ratio_above": GOOD_HEAD_RATIO,
+            "shoulder_tilt_used_for_classification": USE_SHOULDER_TILT,
+            "note": "Recording-specific heuristic thresholds; validate on a separate recording."
+        },
         "coverage_percentage": round(coverage_percentage, 2),
         "unobserved_duration_seconds": round(unobserved_duration, 2),
         **metrics,
@@ -729,3 +751,55 @@ def process_video(
     # is made explicit in the JSON so downstream stages can reject it if
     # their own coverage requirement is stricter.
     return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="CPU-only seated posture monitoring from video."
+    )
+    parser.add_argument(
+        "--source",
+        required=True,
+        help="Webcam index (for example 0) or video file path.",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=60.0,
+        help="Maximum session duration in seconds (default: 60).",
+    )
+    parser.add_argument(
+        "--out",
+        default="posture.json",
+        help="Path for the JSON summary (default: posture.json).",
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Show an optional preview window. Disabled by default.",
+    )
+
+    args = parser.parse_args()
+
+    if not math.isfinite(args.duration) or args.duration <= 0:
+        print("ERROR: --duration must be a positive number.", file=sys.stderr)
+        return 1
+
+    source: Union[int, str] = args.source
+    if args.source.isdigit():
+        source = int(args.source)
+
+    return process_video(
+        source=source,
+        duration=args.duration,
+        output=args.out,
+        preview=args.preview,
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,96 @@
+{
+  "source": "test4.mp4",
+  "fps_used_for_timestamps": 30.013395684691623,
+  "segments_seconds": {
+    "upright": [
+      0.0,
+      18.0
+    ],
+    "slouched": [
+      20.0,
+      40.0
+    ]
+  },
+  "frame_counts": {
+    "upright": 541,
+    "slouched": 600
+  },
+  "valid_pose_counts": {
+    "upright": 541,
+    "slouched": 600
+  },
+  "features": {
+    "torso_angle": {
+      "upright": {
+        "count": 541,
+        "median": 7.656818302126332,
+        "mad": 1.625612806714157,
+        "p10": 3.0637478943454552,
+        "p90": 9.865561057510087
+      },
+      "slouched": {
+        "count": 600,
+        "median": 3.632888237510466,
+        "mad": 0.5438300048399285,
+        "p10": 2.4941496149868954,
+        "p90": 4.702982420035267
+      },
+      "separation": -4.023930064615866,
+      "separable_by_median": false,
+      "good_threshold": null,
+      "bad_threshold": null,
+      "warning": "Slouched median is not higher than upright median. This feature does not separate these segments in the expected direction."
+    },
+    "head_ratio": {
+      "upright": {
+        "count": 541,
+        "median": 0.2043858378078105,
+        "mad": 0.013070882113847437,
+        "p10": 0.18196492242618176,
+        "p90": 0.2254267148100335
+      },
+      "slouched": {
+        "count": 600,
+        "median": 0.02974857660759507,
+        "mad": 0.008737738468907772,
+        "p10": 0.011181448907395771,
+        "p90": 0.046459782290605135
+      },
+      "separation": -0.17463726120021544,
+      "separable_by_median": false,
+      "good_threshold": null,
+      "bad_threshold": null,
+      "warning": "Slouched median is not higher than upright median. This feature does not separate these segments in the expected direction."
+    },
+    "shoulder_tilt": {
+      "upright": {
+        "count": 541,
+        "median": 14.443623388581706,
+        "mad": 3.5851537373683513,
+        "p10": 9.481113493257025,
+        "p90": 25.675546334035182
+      },
+      "slouched": {
+        "count": 600,
+        "median": 15.748243426008816,
+        "mad": 2.559539480277201,
+        "p10": 12.220462234295551,
+        "p90": 23.12413294459567
+      },
+      "separation": 1.3046200374271102,
+      "separable_by_median": true,
+      "central_ranges_overlap": true,
+      "candidate_midpoint": 15.095933407295261,
+      "good_threshold": 14.96547140355255,
+      "bad_threshold": 15.226395411037972,
+      "hysteresis_band_each_side": 0.13046200374271102,
+      "warning": "The central 80% ranges overlap; this feature alone may not reliably distinguish the two postures."
+    }
+  },
+  "notes": [
+    "Candidate thresholds are estimated from this recording only.",
+    "The midpoint between segment medians is a starting decision boundary, not a validated universal threshold.",
+    "Good and bad thresholds form a hysteresis band; confirm their behavior by replaying the recording.",
+    "Shoulder tilt may be unavailable in side-view footage when both shoulders are not visible."
+  ]
+}
